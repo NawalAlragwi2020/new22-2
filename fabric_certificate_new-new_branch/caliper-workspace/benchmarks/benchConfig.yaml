@@ -1,0 +1,69 @@
+test:
+  name: certificate-benchmark-test
+  description: RBAC-enabled certificate performance test
+
+  workers:
+    type: local
+    number: 4
+
+  rounds:
+
+  # ------------------------------------------------
+  # 1️⃣ Issue Certificates (Org1 Only)
+  # ------------------------------------------------
+  - label: Issue Certificates
+    description: Org1 issues certificates
+    txDuration: 30
+    rateControl:
+      type: fixed-rate
+      opts:
+        tps: 50
+    workload:
+      module: workload/issueCertificate.js
+    txOptions:
+      invokerIdentity: User1@org1.example.com
+
+  # ------------------------------------------------
+  # 2️⃣ Verify Certificates
+  # ------------------------------------------------
+  - label: Verify Certificate
+    description: Verifying certificate authenticity
+    txDuration: 30
+    rateControl:
+      type: fixed-rate
+      opts:
+        tps: 50
+    workload:
+      module: workload/verifyCertificate.js
+    txOptions:
+      invokerIdentity: User1@org1.example.com
+
+  # ------------------------------------------------
+  # 3️⃣ Authorized Revoke (Org2 Should Succeed)
+  # ------------------------------------------------
+  - label: Authorized Revoke
+    description: Org2 revokes certificates (should succeed)
+    txDuration: 30
+    rateControl:
+      type: fixed-rate
+      opts:
+        tps: 50
+    workload:
+      module: workload/revokeCertificate.js
+    txOptions:
+      invokerIdentity: User1@org2.example.com
+
+  # ------------------------------------------------
+  # 4️⃣ Unauthorized Revoke (Org1 Should Fail)
+  # ------------------------------------------------
+  - label: Unauthorized Revoke Attempt
+    description: Org1 tries to revoke (should fail)
+    txDuration: 30
+    rateControl:
+      type: fixed-rate
+      opts:
+        tps: 50
+    workload:
+      module: workload/revokeCertificate.js
+    txOptions:
+      invokerIdentity: User1@org1.example.com

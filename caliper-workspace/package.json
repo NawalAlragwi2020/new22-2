@@ -1,0 +1,10 @@
+{
+  "name": "caliper-workspace",
+  "version": "1.0.0",
+  "description": "Hyperledger Caliper Benchmark",
+  "private": true,
+  "dependencies": {
+    "@hyperledger/caliper-cli": "0.5.0",
+    "fabric-network": "^2.2.12"
+  }
+}
