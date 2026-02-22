@@ -1,27 +1,24 @@
 #!/bin/bash
 set -e
-# تشغيل سكربت إصلاح الصلاحيات فقط في بيئة CI أو عند طلب صريح عبر FIX_PERMISSIONS
-# يمكن فرض التشغيل محليًا بتشغيل: FIX_PERMISSIONS=true ./setup_and_run_all.sh
+
+# Run permission fix script only in CI or when explicitly requested
 if [ "${CI:-}" = "true" ] || [ "${CI:-}" = "1" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ "${FIX_PERMISSIONS:-}" = "true" ]; then
   if [ -x "./scripts/fix-permissions.sh" ]; then
-    echo "🔐 Running scripts/fix-permissions.sh to fix permissions (CI or FIX_PERMISSIONS set)..."
+    echo "Running scripts/fix-permissions.sh to fix permissions..."
     ./scripts/fix-permissions.sh || true
   else
-    echo "⚠️ scripts/fix-permissions.sh not found or not executable. Skipping."
+    echo "Warning: scripts/fix-permissions.sh not found or not executable."
   fi
 else
-  echo "ℹ️ Not in CI and FIX_PERMISSIONS not set; skipping permission fix."
+  echo "Skipping permission fix."
 fi
-# 1. مسح أي حاويات أو شبكات قديمة متبقية بالقوة
-docker rm -f $(docker ps -aq) || true
+
+# Clean up any old containers or networks
+docker ps -aq | xargs -r docker rm -f || true
 docker volume prune -f
 
-# --------------------------------------------------------
-# Deep Clean: إزالة صور Docker التي تبدأ بـ dev-* أو dev-peer*
-# هذا يضمن بناء صور العقد الذكي الجديدة بدلاً من إعادة استخدام القديمة
-# --------------------------------------------------------
-echo -e "\n🧹 Performing deep-clean for Docker images starting with dev-*..."
-# جمع معرفات الصور المطابقة
+# Deep Clean: Remove dev-* Docker images for fresh chaincode builds
+echo "Performing deep-clean for Docker images starting with dev-*..."
 DEV_IMAGE_IDS=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^(dev-|dev-peer)/ {print $2}' || true)
 if [ -n "$DEV_IMAGE_IDS" ]; then
   echo "Found dev images: $DEV_IMAGE_IDS"
@@ -30,35 +27,29 @@ else
   echo "No dev-* images found."
 fi
 
-# 2. مسح التقارير القديمة للتأكد أن التقرير الناتج هو الجديد
+# Clean up old reports
 rm -f caliper-workspace/report.html
 
-# 3. التأكد من تحديث الـ Workspace
+# Clean up workspace
 cd caliper-workspace && rm -rf networks/networkConfig.yaml && cd ..
 
-# تعريف الألوان للنصوص
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-NC='\033[0m'
-
-echo -e "${GREEN}🚀 Starting Full Project Setup (Fabric + Caliper)...${NC}"
+echo "Starting Full Project Setup (Fabric + Caliper)..."
 echo "=================================================="
 
-# --------------------------------------------------------
-# 1. التأكد من وجود الأدوات
-# --------------------------------------------------------
-echo -e "${GREEN}📦 Step 1: Checking Fabric Binaries...${NC}"
+# Step 1: Check and download Fabric tools
+echo "Checking Fabric Binaries..."
 if [ ! -d "bin" ]; then
-    echo "⬇️ Downloading Fabric tools..."
+    echo "Downloading Fabric tools..."
     curl -sSL https://bit.ly/2ysbOFE | bash -s -- 2.5.9 1.5.7
 else
-    echo "✅ Fabric tools found."
+    echo "Fabric tools found."
 fi
 
 export PATH=${PWD}/bin:$PATH
 export FABRIC_CFG_PATH=${PWD}/config/
 
-# 1. تشغيل الشبكة
+# Step 2: Start the test network
+echo "Starting test network..."
 cd test-network
 ./network.sh down
 docker volume prune -f
@@ -66,13 +57,14 @@ docker system prune -f
 ./network.sh up createChannel -c mychannel -ca -s couchdb
 cd ..
 
-# 2. نشر العقد الذكي
-echo "📜 Deploying Smart Contract with AND Policy..."
+# Step 3: Deploy smart contract
+echo "Deploying Smart Contract..."
 cd test-network
 ./network.sh deployCC -ccn basic -ccp ../asset-transfer-basic/chaincode-go -ccl go -ccep "OR('Org1MSP.peer','Org2MSP.peer')"
 cd ..
 
-# 3. تشغيل Caliper
+# Step 4: Setup Caliper
+echo "Setting up Caliper..."
 cd caliper-workspace
 
 if [ ! -d "node_modules" ]; then
@@ -80,22 +72,24 @@ if [ ! -d "node_modules" ]; then
     npx caliper bind --caliper-bind-sut fabric:2.2
 fi
 
-echo "🔑 Detecting Private Keys..."
+echo "Detecting Private Keys..."
 
-# Org1 Key
+# Find Org1 Key
 KEY_DIR1="../test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/keystore"
-PVT_KEY1=$(ls $KEY_DIR1/*_sk)
+PVT_KEY1=$(find "$KEY_DIR1" -name "*_sk" | head -n 1)
 
-# Org2 Key
+# Find Org2 Key
 KEY_DIR2="../test-network/organizations/peerOrganizations/org2.example.com/users/User1@org2.example.com/msp/keystore"
-PVT_KEY2=$(ls $KEY_DIR2/*_sk)
+PVT_KEY2=$(find "$KEY_DIR2" -name "*_sk" | head -n 1)
 
 echo "Org1 Key: $PVT_KEY1"
 echo "Org2 Key: $PVT_KEY2"
-# ج) إنشاء ملف إعدادات الشبكة بتنسيق YAML صحيح ومسارات دقيقة
-echo "⚙️ Generating network config..."
+
+# Step 5: Generate network config
+echo "Generating network config..."
 mkdir -p networks
-cat << EOF > networks/networkConfig.yaml
+
+cat > networks/networkConfig.yaml << 'EOFYAML'
 name: Caliper-Fabric
 version: "2.0.0"
 caliper:
@@ -112,27 +106,39 @@ organizations:
       certificates:
         - name: 'User1@org1.example.com'
           clientPrivateKey:
-            path: '$PVT_KEY1'
+            path: 'ORG1_KEY_PLACEHOLDER'
           clientSignedCert:
-            path: '../test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts/User1@org1.example.com-cert.pem'
+            path: '../test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts/cert.pem'
     connectionProfile:
       path: '../test-network/organizations/peerOrganizations/org1.example.com/connection-org1.yaml'
-      discover: true
+      discover: false
 
   - mspid: Org2MSP
     identities:
       certificates:
         - name: 'User1@org2.example.com'
           clientPrivateKey:
-            path: '$PVT_KEY2'
+            path: 'ORG2_KEY_PLACEHOLDER'
           clientSignedCert:
-            path: '../test-network/organizations/peerOrganizations/org2.example.com/users/User1@org2.example.com/msp/signcerts/User1@org2.example.com-cert.pem'
+            path: '../test-network/organizations/peerOrganizations/org2.example.com/users/User1@org2.example.com/msp/signcerts/cert.pem'
     connectionProfile:
       path: '../test-network/organizations/peerOrganizations/org2.example.com/connection-org2.yaml'
-      discover: true
-EOF
+      discover: false
+EOFYAML
 
-echo "🔥 Running Benchmark..."
+# Update the private key paths with actual values
+if [ -n "$PVT_KEY1" ]; then
+  sed -i "s|ORG1_KEY_PLACEHOLDER|$PVT_KEY1|g" networks/networkConfig.yaml
+fi
+
+if [ -n "$PVT_KEY2" ]; then
+  sed -i "s|ORG2_KEY_PLACEHOLDER|$PVT_KEY2|g" networks/networkConfig.yaml
+fi
+
+echo "Network config generated successfully"
+
+# Step 6: Run Caliper benchmark
+echo "Running Caliper Benchmark..."
 
 npx caliper launch manager \
     --caliper-workspace . \
@@ -140,4 +146,6 @@ npx caliper launch manager \
     --caliper-benchconfig benchmarks/benchConfig.yaml \
     --caliper-flow-only-test
 
-echo "✅ Finished. Report at caliper-workspace/report.html"
+echo "Finished. Report at: caliper-workspace/report.html"
+
+cd ..
