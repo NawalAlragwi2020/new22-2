@@ -15,14 +15,15 @@ fi
 
 # Clean up any old containers or networks
 docker ps -aq | xargs -r docker rm -f || true
-docker volume prune -f
+docker volume prune -f || true
 
 # Deep Clean: Remove dev-* Docker images for fresh chaincode builds
 echo "Performing deep-clean for Docker images starting with dev-*..."
 DEV_IMAGE_IDS=$(docker images --format '{{.Repository}} {{.ID}}' | awk '$1 ~ /^(dev-|dev-peer)/ {print $2}' || true)
 if [ -n "$DEV_IMAGE_IDS" ]; then
   echo "Found dev images: $DEV_IMAGE_IDS"
-  docker rmi -f $DEV_IMAGE_IDS || true
+  # FIX #10: quote the variable to prevent word-splitting / globbing issues
+  docker rmi -f "$DEV_IMAGE_IDS" || true
 else
   echo "No dev-* images found."
 fi
@@ -40,7 +41,9 @@ echo "=================================================="
 echo "Checking Fabric Binaries..."
 if [ ! -d "bin" ]; then
     echo "Downloading Fabric tools..."
-    curl -sSL https://bit.ly/2ysbOFE | bash -s -- 2.5.9 1.5.7
+    # FIX #8: use the current official install URL (the bit.ly shortlink was deprecated)
+    curl -sSL https://raw.githubusercontent.com/hyperledger/fabric/main/scripts/install-fabric.sh \
+      | bash -s -- --fabric-version 2.5.9 --ca-version 1.5.7 binary
 else
     echo "Fabric tools found."
 fi
@@ -51,9 +54,9 @@ export FABRIC_CFG_PATH=${PWD}/config/
 # Step 2: Start the test network
 echo "Starting test network..."
 cd test-network
-./network.sh down
-docker volume prune -f
-docker system prune -f
+./network.sh down || true
+docker volume prune -f || true
+docker system prune -f || true
 ./network.sh up createChannel -c mychannel -ca -s couchdb
 cd ..
 
@@ -69,7 +72,9 @@ cd caliper-workspace
 
 if [ ! -d "node_modules" ]; then
     npm install
-    npx caliper bind --caliper-bind-sut fabric:2.2
+    # FIX #1 + #3: use fabric:2.5 to match the deployed Fabric 2.5.9 network
+    # (caliper-cli 0.5.0 does NOT support the old fabric:2.2 binding)
+    npx caliper bind --caliper-bind-sut fabric:2.5
 fi
 
 echo "Detecting Private Keys..."
@@ -84,6 +89,16 @@ PVT_KEY2=$(find "$KEY_DIR2" -name "*_sk" | head -n 1)
 
 echo "Org1 Key: $PVT_KEY1"
 echo "Org2 Key: $PVT_KEY2"
+
+# Validate that both keys were actually found before continuing
+if [ -z "$PVT_KEY1" ]; then
+  echo "ERROR: Org1 private key not found in $KEY_DIR1 – is the network running?"
+  exit 1
+fi
+if [ -z "$PVT_KEY2" ]; then
+  echo "ERROR: Org2 private key not found in $KEY_DIR2 – is the network running?"
+  exit 1
+fi
 
 # Step 5: Generate network config
 echo "Generating network config..."
@@ -110,7 +125,7 @@ organizations:
           clientSignedCert:
             path: '../test-network/organizations/peerOrganizations/org1.example.com/users/User1@org1.example.com/msp/signcerts/cert.pem'
     connectionProfile:
-      path: '../test-network/organizations/peerOrganizations/org1.example.com/connection-org1.yaml'
+      path: 'networks/connection-org1.yaml'
       discover: false
 
   - mspid: Org2MSP
@@ -122,20 +137,165 @@ organizations:
           clientSignedCert:
             path: '../test-network/organizations/peerOrganizations/org2.example.com/users/User1@org2.example.com/msp/signcerts/cert.pem'
     connectionProfile:
-      path: '../test-network/organizations/peerOrganizations/org2.example.com/connection-org2.yaml'
+      path: 'networks/connection-org2.yaml'
       discover: false
 EOFYAML
 
 # Update the private key paths with actual values
-if [ -n "$PVT_KEY1" ]; then
-  sed -i "s|ORG1_KEY_PLACEHOLDER|$PVT_KEY1|g" networks/networkConfig.yaml
-fi
-
-if [ -n "$PVT_KEY2" ]; then
-  sed -i "s|ORG2_KEY_PLACEHOLDER|$PVT_KEY2|g" networks/networkConfig.yaml
-fi
+sed -i "s|ORG1_KEY_PLACEHOLDER|$PVT_KEY1|g" networks/networkConfig.yaml
+sed -i "s|ORG2_KEY_PLACEHOLDER|$PVT_KEY2|g" networks/networkConfig.yaml
 
 echo "Network config generated successfully"
+
+# -----------------------------------------------------------------------
+# FIX #4: Generate connection-org1.yaml (was missing from original script)
+# -----------------------------------------------------------------------
+echo "Generating connection-org1.yaml..."
+cat > networks/connection-org1.yaml << EOFCONN1
+name: test-network-org1
+version: 1.0.0
+client:
+  organization: Org1
+  connection:
+    timeout:
+      peer:
+        endorser: '300'
+      orderer: '300'
+
+channels:
+  mychannel:
+    orderers:
+      - orderer.example.com
+    peers:
+      peer0.org1.example.com:
+        endorsingPeer: true
+        chaincodeQuery: true
+        ledgerQuery: true
+        eventSource: true
+      peer0.org2.example.com:
+        endorsingPeer: true
+        chaincodeQuery: false
+        ledgerQuery: false
+        eventSource: false
+
+organizations:
+  Org1:
+    mspid: Org1MSP
+    peers:
+      - peer0.org1.example.com
+    certificateAuthorities:
+      - ca.org1.example.com
+
+orderers:
+  orderer.example.com:
+    url: grpcs://localhost:7050
+    grpcOptions:
+      ssl-target-name-override: orderer.example.com
+      hostnameOverride: orderer.example.com
+    tlsCACerts:
+      path: ../test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+
+peers:
+  peer0.org1.example.com:
+    url: grpcs://localhost:7051
+    grpcOptions:
+      ssl-target-name-override: peer0.org1.example.com
+      hostnameOverride: peer0.org1.example.com
+    tlsCACerts:
+      path: ../test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+  peer0.org2.example.com:
+    url: grpcs://localhost:9051
+    grpcOptions:
+      ssl-target-name-override: peer0.org2.example.com
+      hostnameOverride: peer0.org2.example.com
+    tlsCACerts:
+      path: ../test-network/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+
+certificateAuthorities:
+  ca.org1.example.com:
+    url: https://localhost:7054
+    caName: ca-org1
+    tlsCACerts:
+      path: ../test-network/organizations/peerOrganizations/org1.example.com/ca/ca.org1.example.com-cert.pem
+    httpOptions:
+      verify: false
+EOFCONN1
+
+# -----------------------------------------------------------------------
+# FIX #4 (cont.): Generate connection-org2.yaml (was COMPLETELY missing)
+# -----------------------------------------------------------------------
+echo "Generating connection-org2.yaml..."
+cat > networks/connection-org2.yaml << EOFCONN2
+name: test-network-org2
+version: 1.0.0
+client:
+  organization: Org2
+  connection:
+    timeout:
+      peer:
+        endorser: '300'
+      orderer: '300'
+
+channels:
+  mychannel:
+    orderers:
+      - orderer.example.com
+    peers:
+      peer0.org2.example.com:
+        endorsingPeer: true
+        chaincodeQuery: true
+        ledgerQuery: true
+        eventSource: true
+      peer0.org1.example.com:
+        endorsingPeer: true
+        chaincodeQuery: false
+        ledgerQuery: false
+        eventSource: false
+
+organizations:
+  Org2:
+    mspid: Org2MSP
+    peers:
+      - peer0.org2.example.com
+    certificateAuthorities:
+      - ca.org2.example.com
+
+orderers:
+  orderer.example.com:
+    url: grpcs://localhost:7050
+    grpcOptions:
+      ssl-target-name-override: orderer.example.com
+      hostnameOverride: orderer.example.com
+    tlsCACerts:
+      path: ../test-network/organizations/ordererOrganizations/example.com/orderers/orderer.example.com/msp/tlscacerts/tlsca.example.com-cert.pem
+
+peers:
+  peer0.org2.example.com:
+    url: grpcs://localhost:9051
+    grpcOptions:
+      ssl-target-name-override: peer0.org2.example.com
+      hostnameOverride: peer0.org2.example.com
+    tlsCACerts:
+      path: ../test-network/organizations/peerOrganizations/org2.example.com/peers/peer0.org2.example.com/tls/ca.crt
+  peer0.org1.example.com:
+    url: grpcs://localhost:7051
+    grpcOptions:
+      ssl-target-name-override: peer0.org1.example.com
+      hostnameOverride: peer0.org1.example.com
+    tlsCACerts:
+      path: ../test-network/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt
+
+certificateAuthorities:
+  ca.org2.example.com:
+    url: https://localhost:8054
+    caName: ca-org2
+    tlsCACerts:
+      path: ../test-network/organizations/peerOrganizations/org2.example.com/ca/ca.org2.example.com-cert.pem
+    httpOptions:
+      verify: false
+EOFCONN2
+
+echo "Connection profiles generated successfully"
 
 # Step 6: Run Caliper benchmark
 echo "Running Caliper Benchmark..."
